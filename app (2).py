@@ -1,98 +1,108 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Mon Dec  8 14:54:43 2025
-
-@author: lianc
-"""
-
 import streamlit as st
 import pandas as pd
-from datetime import date, datetime
+from datetime import date
 from rapidfuzz import fuzz
-from openpyxl import load_workbook, Workbook
-import os
 
-FOOD_FILE = "foodssugar.xlsx"
-RECORD_FILE = "Ruby_records.xlsx"
+import gspread
+from google.oauth2.service_account import Credentials
 
+# ======== Google Sheets 設定 ========
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+SHEET_ID = st.secrets["1vD-vEszbCPVeVKjKEd0VGBvLak4a12gbiowNvnB0Ik8"]  # 在 secrets.toml 裡設定
 
-# ---------- 初始化 Excel ----------
+@st.cache_resource
+def get_gsheet_client():
+    """
+    用 service account 建立 gspread client（只建立一次，之後重用）
+    """
+    creds_info = st.secrets["gcp_service_account"]
+    creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
+    client = gspread.authorize(creds)
+    return client
 
-def init_food_file():
-    if not os.path.exists(FOOD_FILE):
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "食物資料"
-        ws.append(["食物名稱", "單位", "碳水化合物", "備註"])
-        wb.save(FOOD_FILE)
+@st.cache_data
+def load_foods_df() -> pd.DataFrame:
+    """
+    從 Google Sheets 的「食物資料」工作表讀取資料
+    """
+    client = get_gsheet_client()
+    sh = client.open_by_key(SHEET_ID)
+    ws = sh.worksheet("食物資料")
+    records = ws.get_all_records()
+    if not records:
+        # 沒有資料時回傳空 DataFrame
+        return pd.DataFrame(columns=["食物名稱", "單位", "碳水化合物", "備註"])
+    df = pd.DataFrame(records)
+    return df
 
-def init_record_file():
-    if not os.path.exists(RECORD_FILE):
-        wb = Workbook()
-        ws_food = wb.create_sheet("食物記錄")
-        ws_food.append(["日期", "餐別", "食物名稱", "攝取量", "單位", "碳水化合物"])
-
-        ws_insulin = wb.create_sheet("血糖與胰島素紀錄表")
-        ws_insulin.append([
+@st.cache_data
+def load_insulin_records_df() -> pd.DataFrame:
+    """
+    （可選）讀取「血糖與胰島素紀錄表」，之後如果要做歷史查詢可以用
+    """
+    client = get_gsheet_client()
+    sh = client.open_by_key(SHEET_ID)
+    ws = sh.worksheet("血糖與胰島素紀錄表")
+    records = ws.get_all_records()
+    if not records:
+        return pd.DataFrame(columns=[
             "日期", "餐別", "總碳水量", "目前血糖值", "期望血糖值",
             "C/I值", "ISF值", "1C升高血糖", "碳水劑量", "矯正劑量",
             "總胰島素劑量", "餐後血糖值", "建議C/I值"
         ])
-        wb.save(RECORD_FILE)
+    return pd.DataFrame(records)
 
-
-# ---------- Cache 讀檔 ----------
-
-@st.cache_data
-def load_foods_df() -> pd.DataFrame:
-    init_food_file()
-    df = pd.read_excel(FOOD_FILE, sheet_name="食物資料")
-    return df
-
-@st.cache_data
-def load_records_df() -> pd.DataFrame:
-    init_record_file()
-    # 這裡僅示範讀取血糖紀錄，如需要可以再加食物紀錄
-    df = pd.read_excel(RECORD_FILE, sheet_name="血糖與胰島素紀錄表")
-    return df
-
-
-# ---------- 寫檔（不 cache） ----------
-
-def save_foods_df(df: pd.DataFrame):
-    df.to_excel(FOOD_FILE, sheet_name="食物資料", index=False)
-    load_foods_df.clear()   # 清除 cache，下次會重讀最新資料
-
-def append_record(
-    date_str, meal, calc_items, total_carb,
+def append_meal_to_sheets(
+    date_str, meal,
+    calc_items, total_carb,
     current_glucose, target_glucose,
     ci, isf, c_raise,
     insulin_carb, insulin_corr, total_insulin
 ):
-    init_record_file()
-    wb = load_workbook(RECORD_FILE)
+    """
+    將一餐的資料寫入 Google Sheets：
+    - 食物明細 → 「食物記錄」
+    - 血糖與胰島素 → 「血糖與胰島素紀錄表」
+    """
+    client = get_gsheet_client()
+    sh = client.open_by_key(SHEET_ID)
 
-    ws_food = wb["食物記錄"]
+    # --- 寫入「食物記錄」 ---
+    ws_food = sh.worksheet("食物記錄")
     for item in calc_items:
-        ws_food.append([
-            date_str, meal,
-            item["name"], item["amount"], item["unit"], item["carb"]
+        ws_food.append_row([
+            date_str,
+            meal,
+            item["name"],
+            item["amount"],
+            item["unit"],
+            item["carb"],
         ])
-    ws_food.append(["", "", "", "", "總碳水", total_carb])
+    # 總碳水小結
+    ws_food.append_row(["", "", "", "", "總碳水", total_carb])
 
-    ws_insulin = wb["血糖與胰島素紀錄表"]
-    ws_insulin.append([
-        date_str, meal, total_carb, current_glucose, target_glucose,
-        ci, isf, c_raise, insulin_carb, insulin_corr, total_insulin,
-        None,  # 餐後血糖值
-        None   # 建議 C/I
+    # --- 寫入「血糖與胰島素紀錄表」 ---
+    ws_insulin = sh.worksheet("血糖與胰島素紀錄表")
+    ws_insulin.append_row([
+        date_str,
+        meal,
+        total_carb,
+        current_glucose,
+        target_glucose,
+        ci,
+        isf,
+        c_raise,
+        insulin_carb,
+        insulin_corr,
+        total_insulin,
+        "",      # 餐後血糖值，之後可另外寫入
+        "",      # 建議 C/I 值
     ])
 
-    wb.save(RECORD_FILE)
-    load_records_df.clear()
+    # 清掉 cache，下次讀取才會拿到最新資料
+    load_insulin_records_df.clear()
 
-
-# ---------- 邏輯：找相似食物 / 計算 ----------
+# ======== 工具函式 ========
 
 def find_similar_foods(df_foods: pd.DataFrame, keyword: str, threshold=60):
     if not keyword:
@@ -122,11 +132,10 @@ def calc_insulin_dose(total_carb, ci, isf, current_glucose, target_glucose):
     return insulin_carb, insulin_corr, total_insulin
 
 
-# ---------- Streamlit App ----------
+# ======== Streamlit 介面 ========
 
-st.set_page_config(page_title="食物碳水與胰島素紀錄", layout="centered")
-
-st.title("🍚 食物碳水與胰島素紀錄（手機版友善）")
+st.set_page_config(page_title="食物碳水與胰島素紀錄（Google Sheets 版）", layout="centered")
+st.title("🍚 食物碳水與胰島素紀錄（Google Sheets）")
 
 # 用 session_state 存「這一餐的食物列表」
 if "calc_items" not in st.session_state:
@@ -134,6 +143,7 @@ if "calc_items" not in st.session_state:
 
 foods_df = load_foods_df()
 
+# --- Step 1：日期 & 餐別 ---
 st.markdown("### Step 1：設定日期與餐別")
 col1, col2 = st.columns(2)
 with col1:
@@ -143,23 +153,36 @@ with col2:
 
 st.divider()
 
+# --- Step 2：加入本餐食物 ---
 st.markdown("### Step 2：加入本餐食物")
 
 with st.form("add_food_form", clear_on_submit=True):
     keyword = st.text_input("🔍 搜尋食物名稱（關鍵字）")
     filtered = find_similar_foods(foods_df, keyword)
 
+    selected_food = None
+
     if filtered.empty:
-        st.info("查無相似食物，可以到『食物管理頁』新增。")
-        selected_food = None
+        st.info("查無相似食物，可以直接到 Google Sheets 的『食物資料』工作表新增。")
     else:
-        food_options = filtered["食物名稱"] + "｜每" + filtered["單位"] + f" 含 " + filtered["碳水化合物"].astype(str) + "g"
-        idx = st.selectbox("選擇食物", range(len(filtered)), format_func=lambda i: food_options.iloc[i])
-        selected_row = filtered.iloc[idx]
+        food_options = (
+            filtered["食物名稱"]
+            + "｜每"
+            + filtered["單位"]
+            + " 含 "
+            + filtered["碳水化合物"].astype(str)
+            + "g"
+        )
+        idx = st.selectbox(
+            "選擇食物",
+            range(len(filtered)),
+            format_func=lambda i: food_options.iloc[i],
+        )
+        row = filtered.iloc[idx]
         selected_food = {
-            "name": selected_row["食物名稱"],
-            "unit": selected_row["單位"],
-            "carb_per_unit": float(selected_row["碳水化合物"]),
+            "name": row["食物名稱"],
+            "unit": row["單位"],
+            "carb_per_unit": float(row["碳水化合物"]),
         }
 
     amount = st.number_input("攝取量（同上單位）", min_value=0.0, step=1.0)
@@ -179,17 +202,17 @@ with st.form("add_food_form", clear_on_submit=True):
             })
             st.success(f"已加入：{selected_food['name']}，碳水 {carb} g")
 
-# 顯示目前本餐食物清單
+# 顯示本餐食物列表
 if st.session_state.calc_items:
     st.markdown("#### 本餐食物清單")
     df_current = pd.DataFrame(st.session_state.calc_items)
-    df_current_display = df_current.rename(columns={
+    df_display = df_current.rename(columns={
         "name": "食物名稱",
         "unit": "單位",
         "amount": "攝取量",
         "carb": "碳水(g)"
     })
-    st.dataframe(df_current_display, use_container_width=True)
+    st.dataframe(df_display, use_container_width=True)
 
     total_carb = round(df_current["carb"].sum(), 2)
     st.subheader(f"本餐總碳水量：**{total_carb} g**")
@@ -203,7 +226,8 @@ else:
 
 st.divider()
 
-st.markdown("### Step 3：輸入血糖與參數，計算胰島素劑量")
+# --- Step 3：輸入血糖 & 參數，計算 + 儲存 ---
+st.markdown("### Step 3：輸入血糖與參數，計算胰島素劑量並儲存到 Google Sheets")
 
 with st.form("calc_insulin_form"):
     col1, col2 = st.columns(2)
@@ -218,9 +242,6 @@ with st.form("calc_insulin_form"):
     calc_and_save = st.form_submit_button("🧮 計算胰島素並儲存")
 
     if calc_and_save:
-        if not st.session_state.calc_items:
-            st.warning("尚未加入任何食物，本餐碳水為 0，仍可儲存血糖與參數。")
-
         if ci <= 0 or isf <= 0:
             st.error("請輸入有效的 C/I 與 ISF 值（需大於 0）")
         else:
@@ -237,14 +258,22 @@ with st.form("calc_insulin_form"):
             """)
 
             date_str = meal_date.strftime("%Y-%m-%d")
-            append_record(
-                date_str, meal,
-                st.session_state.calc_items, total_carb,
-                int(current_glucose), int(target_glucose),
-                float(ci), float(isf), float(c_raise),
-                float(insulin_carb), float(insulin_corr), float(total_insulin)
+
+            # 寫入 Google Sheets
+            append_meal_to_sheets(
+                date_str,
+                meal,
+                st.session_state.calc_items,
+                total_carb,
+                int(current_glucose),
+                int(target_glucose),
+                float(ci),
+                float(isf),
+                float(c_raise),
+                float(insulin_carb),
+                float(insulin_corr),
+                float(total_insulin),
             )
 
-            st.success(f"已儲存 {date_str} {meal} 的紀錄")
-            # 儲存一餐後，清除本餐食物
+            st.success(f"✅ 已儲存 {date_str} {meal} 的紀錄到 Google Sheets")
             st.session_state.calc_items = []
