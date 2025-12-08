@@ -5,3 +5,5 @@ oauth2client
 rapidfuzz
 openpyxl
 python-Levenshtein
+google-auth
+numpy
