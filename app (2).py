@@ -5,6 +5,7 @@ from rapidfuzz import fuzz
 
 import gspread
 from google.oauth2.service_account import Credentials
+from gspread.exceptions import WorksheetNotFound
 
 # ======== Google Sheets 設定 ========
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -42,7 +43,15 @@ def load_insulin_records_df() -> pd.DataFrame:
     """
     client = get_gsheet_client()
     sh = client.open_by_key(SHEET_ID)
-    ws = sh.worksheet("血糖與胰島素紀錄表")
+    try:
+        ws = sh.worksheet("血糖與胰島素紀錄表")
+    except WorksheetNotFound:
+        return pd.DataFrame(columns=[
+            "日期", "餐別", "總碳水量", "目前血糖值", "期望血糖值",
+            "C/I值", "ISF值", "1C升高血糖", "碳水劑量", "矯正劑量",
+            "總胰島素劑量", "餐後血糖值", "建議C/I值"
+        ])
+
     records = ws.get_all_records()
     if not records:
         return pd.DataFrame(columns=[
@@ -68,7 +77,12 @@ def append_meal_to_sheets(
     sh = client.open_by_key(SHEET_ID)
 
     # --- 寫入「食物記錄」 ---
-    ws_food = sh.worksheet("食物記錄")
+    try:
+        ws_food = sh.worksheet("食物記錄")
+    except WorksheetNotFound:
+        ws_food = sh.add_worksheet(title="食物記錄", rows=1000, cols=6)
+        ws_food.append_row(["日期", "餐別", "食物名稱", "攝取量", "單位", "碳水化合物"])
+
     for item in calc_items:
         ws_food.append_row([
             date_str,
@@ -82,7 +96,16 @@ def append_meal_to_sheets(
     ws_food.append_row(["", "", "", "", "總碳水", total_carb])
 
     # --- 寫入「血糖與胰島素紀錄表」 ---
-    ws_insulin = sh.worksheet("血糖與胰島素紀錄表")
+    try:
+        ws_insulin = sh.worksheet("血糖與胰島素紀錄表")
+    except WorksheetNotFound:
+        ws_insulin = sh.add_worksheet(title="血糖與胰島素紀錄表", rows=1000, cols=13)
+        ws_insulin.append_row([
+            "日期", "餐別", "總碳水量", "目前血糖值", "期望血糖值",
+            "C/I值", "ISF值", "1C升高血糖", "碳水劑量", "矯正劑量",
+            "總胰島素劑量", "餐後血糖值", "建議C/I值"
+        ])
+
     ws_insulin.append_row([
         date_str,
         meal,
@@ -101,6 +124,72 @@ def append_meal_to_sheets(
 
     # 清掉 cache，下次讀取才會拿到最新資料
     load_insulin_records_df.clear()
+
+def update_post_glucose_and_ci(date_str: str, meal: str, post_glucose: int):
+    """
+    將指定日期 + 餐別的餐後血糖值寫入『血糖與胰島素紀錄表』，
+    並依照你原本的公式回推建議 C/I，寫入同一列的第 13 欄。
+    回傳計算出的 recommended_ci（若無法計算則回傳 None）。
+    """
+    client = get_gsheet_client()
+    sh = client.open_by_key(SHEET_ID)
+
+    try:
+        ws = sh.worksheet("血糖與胰島素紀錄表")
+    except WorksheetNotFound:
+        return None
+
+    # 讀取所有紀錄（跳過表頭）
+    records = ws.get_all_records()
+
+    target_row_index = None  # Google Sheet 的列號（從 2 開始，因為第 1 列是標題）
+    matched_record = None
+
+    for idx, rec in enumerate(records, start=2):
+        if str(rec.get("日期")).strip() == date_str and str(rec.get("餐別")).strip() == meal:
+            target_row_index = idx
+            matched_record = rec
+            break
+
+    if target_row_index is None:
+        # 找不到該日期 + 餐別
+        return None
+
+    # 先寫入餐後血糖值（第 12 欄）
+    ws.update_cell(target_row_index, 12, int(post_glucose))
+
+    # 取出回推 C/I 需要的欄位
+    try:
+        total_carb = float(matched_record.get("總碳水量"))
+        current_glucose = int(matched_record.get("目前血糖值"))
+        isf = float(matched_record.get("ISF值"))
+        total_insulin = float(matched_record.get("總胰島素劑量"))
+    except (TypeError, ValueError):
+        return None
+
+    if isf == 0:
+        return None
+
+    # 套用你原本的公式：
+    # correction_part = (current_glucose - post_glucose) / isf
+    # denominator = total_insulin - correction_part
+    correction_part = (current_glucose - post_glucose) / isf
+    denominator = total_insulin - correction_part
+
+    if denominator <= 0:
+        recommended_ci = None
+    else:
+        recommended_ci = round(total_carb / denominator, 2)
+        # 寫入第 13 欄：建議C/I值
+        ws.update_cell(target_row_index, 13, recommended_ci)
+
+    # 清掉 cache
+    try:
+        load_insulin_records_df.clear()
+    except NameError:
+        pass
+
+    return recommended_ci
 
 # ======== 工具函式 ========
 
@@ -277,3 +366,26 @@ with st.form("calc_insulin_form"):
 
             st.success(f"✅ 已儲存 {date_str} {meal} 的紀錄到 Google Sheets")
             st.session_state.calc_items = []
+
+st.divider()
+
+# --- Step 4：輸入餐後血糖，更新餐後血糖值 & 建議 C/I ---
+st.markdown("### Step 4：輸入餐後血糖，更新『餐後血糖值』與『建議 C/I』")
+
+post_glucose = st.number_input("📈 餐後血糖值", min_value=0, step=1, key="post_glucose")
+
+if st.button("📥 儲存餐後血糖並回推建議 C/I"):
+    if post_glucose <= 0:
+        st.warning("請先輸入大於 0 的餐後血糖值")
+    else:
+        date_str = meal_date.strftime("%Y-%m-%d")
+        if not meal:
+            st.warning("請先在 Step 1 選擇『餐別』")
+        else:
+            recommended_ci = update_post_glucose_and_ci(date_str, meal, int(post_glucose))
+
+            if recommended_ci is None:
+                st.error("找不到對應的紀錄，或該餐資料不足（總碳水量 / 目前血糖 / ISF / 總胰島素），無法計算建議 C/I。")
+            else:
+                st.success(f"✅ 已寫入餐後血糖值，回推建議 C/I 為：{recommended_ci}")
+                st.info("之後可以把這個建議值用在同一餐別的 C/I 設定。")
