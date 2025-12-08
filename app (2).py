@@ -8,7 +8,7 @@ from google.oauth2.service_account import Credentials
 
 # ======== Google Sheets 設定 ========
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-SHEET_ID = st.secrets["1vD-vEszbCPVeVKjKEd0VGBvLak4a12gbiowNvnB0Ik8"]  # 在 secrets.toml 裡設定
+SHEET_ID = st.secrets["MAIN_SHEET_ID"]  # 在 secrets.toml 裡設定
 
 @st.cache_resource
 def get_gsheet_client():
