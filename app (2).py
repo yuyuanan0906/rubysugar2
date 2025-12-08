@@ -8,7 +8,7 @@ Created on Mon Dec  8 14:54:43 2025
 import streamlit as st
 import pandas as pd
 from datetime import date, datetime
-from fuzzywuzzy import fuzz
+from rapidfuzz import fuzz
 from openpyxl import load_workbook, Workbook
 import os
 
