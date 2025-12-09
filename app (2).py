@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import date
+from datetime import date, datetime
 from rapidfuzz import fuzz
 
 import gspread
@@ -209,6 +209,62 @@ def update_post_glucose_and_ci(date_str: str, meal: str, post_glucose: int):
     return recommended_ci
 
 
+def get_last_recommended_ci_for_meal(meal: str, current_date_str: str):
+    """
+    從『血糖與胰島素紀錄表』中，找出：
+    - 餐別 == meal
+    - 建議C/I值 有值
+    - 日期 <= current_date_str
+    的最新一筆紀錄，回傳 (ci, 日期字串)，找不到則回傳 (None, None)
+    """
+    client = get_gsheet_client()
+    sh = client.open_by_key(SHEET_ID)
+    try:
+        ws = sh.worksheet("血糖與胰島素紀錄表")
+    except WorksheetNotFound:
+        return None, None
+
+    records = ws.get_all_records()
+    if not records:
+        return None, None
+
+    try:
+        current_date = datetime.strptime(current_date_str, "%Y-%m-%d").date()
+    except Exception:
+        return None, None
+
+    latest_date = None
+    latest_ci = None
+
+    for rec in records:
+        d_str = str(rec.get("日期") or "").strip()
+        m_str = str(rec.get("餐別") or "").strip()
+        ci_val = rec.get("建議C/I值")
+
+        if not d_str or m_str != meal or ci_val in (None, "", 0):
+            continue
+
+        try:
+            d_obj = datetime.strptime(d_str, "%Y-%m-%d").date()
+        except Exception:
+            continue
+
+        if d_obj <= current_date:
+            if latest_date is None or d_obj > latest_date:
+                latest_date = d_obj
+                latest_ci = ci_val
+
+    if latest_ci is None:
+        return None, None
+
+    try:
+        latest_ci = float(latest_ci)
+    except Exception:
+        return None, None
+
+    return latest_ci, latest_date.strftime("%Y-%m-%d") if latest_date else None
+
+
 # ======== 食物資料新增 / 刪除相關函式 ========
 
 def add_food_item(name: str, unit: str, carb: float, note: str):
@@ -284,9 +340,11 @@ def calc_insulin_dose(total_carb, ci, isf, current_glucose, target_glucose):
 st.set_page_config(page_title="食物碳水與胰島素紀錄（Google Sheets 版）", layout="centered")
 st.title("🍚 食物碳水與胰島素紀錄（Google Sheets）")
 
-# 用 session_state 存「這一餐的食物列表」
+# 用 session_state 存「這一餐的食物列表」與 C/I 值
 if "calc_items" not in st.session_state:
     st.session_state.calc_items = []
+if "ci_value" not in st.session_state:
+    st.session_state.ci_value = 0.0
 
 foods_df = load_foods_df()
 
@@ -395,24 +453,34 @@ st.divider()
 # --- Step 3：輸入血糖 & 參數，計算 + 儲存 ---
 st.markdown("### Step 3：輸入血糖與參數，計算胰島素劑量並儲存到 Google Sheets")
 
+# 若之前有載入的 C/I 提示，顯示在這裡
+if "ci_hint" in st.session_state and st.session_state.ci_hint:
+    st.info(st.session_state.ci_hint)
+
 with st.form("calc_insulin_form"):
     col1, col2 = st.columns(2)
     with col1:
         current_glucose = st.number_input("🩸 目前血糖值", min_value=0, step=1)
         target_glucose = st.number_input("🎯 期望血糖值", min_value=0, step=1, value=100)
     with col2:
-        ci = st.number_input("C/I 值", min_value=0.0, step=0.1)
+        ci_input = st.number_input(
+            "C/I 值",
+            min_value=0.0,
+            step=0.1,
+            key="ci_value"
+        )
         isf = st.number_input("ISF 值", min_value=0.0, step=0.1, value=50.0)
     c_raise = st.number_input("1C 升高血糖", min_value=0.0, step=0.1, value=0.0)
 
     calc_and_save = st.form_submit_button("🧮 計算胰島素並儲存")
 
     if calc_and_save:
-        if ci <= 0 or isf <= 0:
+        ci_val = st.session_state.ci_value
+        if ci_val <= 0 or isf <= 0:
             st.error("請輸入有效的 C/I 與 ISF 值（需大於 0）")
         else:
             insulin_carb, insulin_corr, total_insulin = calc_insulin_dose(
-                total_carb, ci, isf, current_glucose, target_glucose
+                total_carb, ci_val, isf, current_glucose, target_glucose
             )
 
             st.markdown(f"""
@@ -433,7 +501,7 @@ with st.form("calc_insulin_form"):
                 total_carb,
                 int(current_glucose),
                 int(target_glucose),
-                float(ci),
+                float(ci_val),
                 float(isf),
                 float(c_raise),
                 float(insulin_carb),
@@ -443,6 +511,21 @@ with st.form("calc_insulin_form"):
 
             st.success(f"✅ 已儲存 {date_str} {meal} 的紀錄到 Google Sheets")
             st.session_state.calc_items = []
+            # 計算完不清空 ci_value，方便下一餐沿用或再載入
+
+# 在 form 外面加一個按鈕，用來載入前一次同餐別的建議 C/I
+if st.button("🔍 載入前一次該餐別的建議 C/I"):
+    if not meal:
+        st.warning("請先在 Step 1 選擇『餐別』")
+    else:
+        date_str = meal_date.strftime("%Y-%m-%d")
+        latest_ci, latest_date_str = get_last_recommended_ci_for_meal(meal, date_str)
+        if latest_ci is None:
+            st.warning("查無該餐別的建議 C/I 紀錄，或是目前日期之前都沒有。")
+        else:
+            st.session_state.ci_value = float(latest_ci)
+            st.session_state.ci_hint = f"已自 {latest_date_str} 的 {meal} 載入建議 C/I：{latest_ci}"
+            st.rerun()
 
 st.divider()
 
