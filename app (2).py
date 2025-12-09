@@ -54,7 +54,7 @@ def load_foods_df() -> pd.DataFrame:
 @st.cache_data
 def load_insulin_records_df() -> pd.DataFrame:
     """
-    （可選）讀取「血糖與胰島素紀錄表」，之後如果要做歷史查詢可以用
+    讀取「血糖與胰島素紀錄表」，之後如果要做歷史查詢可以用
     """
     client = get_gsheet_client()
     sh = client.open_by_key(SHEET_ID)
@@ -145,7 +145,7 @@ def append_meal_to_sheets(
 def update_post_glucose_and_ci(date_str: str, meal: str, post_glucose: int):
     """
     將指定日期 + 餐別的餐後血糖值寫入『血糖與胰島素紀錄表』，
-    並依照你原本的公式回推建議 C/I，寫入同一列的第 13 欄。
+    並依照你的公式回推建議 C/I，寫入同一列的第 13 欄。
     回傳計算出的 recommended_ci（若無法計算則回傳 None）。
     """
     client = get_gsheet_client()
@@ -187,7 +187,6 @@ def update_post_glucose_and_ci(date_str: str, meal: str, post_glucose: int):
     if isf == 0:
         return None
 
-    # 套用你原本的公式：
     # correction_part = (current_glucose - post_glucose) / isf
     # denominator = total_insulin - correction_part
     correction_part = (current_glucose - post_glucose) / isf
@@ -340,11 +339,13 @@ def calc_insulin_dose(total_carb, ci, isf, current_glucose, target_glucose):
 st.set_page_config(page_title="食物碳水與胰島素紀錄（Google Sheets 版）", layout="centered")
 st.title("🍚 食物碳水與胰島素紀錄（Google Sheets）")
 
-# 用 session_state 存「這一餐的食物列表」與 C/I 值
+# 用 session_state 存「這一餐的食物列表」與 C/I 預設值、提示文字
 if "calc_items" not in st.session_state:
     st.session_state.calc_items = []
-if "ci_value" not in st.session_state:
-    st.session_state.ci_value = 0.0
+if "ci_default" not in st.session_state:
+    st.session_state.ci_default = 0.0
+if "ci_hint" not in st.session_state:
+    st.session_state.ci_hint = ""
 
 foods_df = load_foods_df()
 
@@ -454,7 +455,7 @@ st.divider()
 st.markdown("### Step 3：輸入血糖與參數，計算胰島素劑量並儲存到 Google Sheets")
 
 # 若之前有載入的 C/I 提示，顯示在這裡
-if "ci_hint" in st.session_state and st.session_state.ci_hint:
+if st.session_state.ci_hint:
     st.info(st.session_state.ci_hint)
 
 with st.form("calc_insulin_form"):
@@ -463,11 +464,11 @@ with st.form("calc_insulin_form"):
         current_glucose = st.number_input("🩸 目前血糖值", min_value=0, step=1)
         target_glucose = st.number_input("🎯 期望血糖值", min_value=0, step=1, value=100)
     with col2:
-        ci_input = st.number_input(
+        ci = st.number_input(
             "C/I 值",
             min_value=0.0,
             step=0.1,
-            key="ci_value"
+            value=st.session_state.ci_default,
         )
         isf = st.number_input("ISF 值", min_value=0.0, step=0.1, value=50.0)
     c_raise = st.number_input("1C 升高血糖", min_value=0.0, step=0.1, value=0.0)
@@ -475,12 +476,11 @@ with st.form("calc_insulin_form"):
     calc_and_save = st.form_submit_button("🧮 計算胰島素並儲存")
 
     if calc_and_save:
-        ci_val = st.session_state.ci_value
-        if ci_val <= 0 or isf <= 0:
+        if ci <= 0 or isf <= 0:
             st.error("請輸入有效的 C/I 與 ISF 值（需大於 0）")
         else:
             insulin_carb, insulin_corr, total_insulin = calc_insulin_dose(
-                total_carb, ci_val, isf, current_glucose, target_glucose
+                total_carb, ci, isf, current_glucose, target_glucose
             )
 
             st.markdown(f"""
@@ -501,7 +501,7 @@ with st.form("calc_insulin_form"):
                 total_carb,
                 int(current_glucose),
                 int(target_glucose),
-                float(ci_val),
+                float(ci),
                 float(isf),
                 float(c_raise),
                 float(insulin_carb),
@@ -511,7 +511,7 @@ with st.form("calc_insulin_form"):
 
             st.success(f"✅ 已儲存 {date_str} {meal} 的紀錄到 Google Sheets")
             st.session_state.calc_items = []
-            # 計算完不清空 ci_value，方便下一餐沿用或再載入
+            # C/I 不清空，方便下一餐沿用或再載入
 
 # 在 form 外面加一個按鈕，用來載入前一次同餐別的建議 C/I
 if st.button("🔍 載入前一次該餐別的建議 C/I"):
@@ -523,7 +523,7 @@ if st.button("🔍 載入前一次該餐別的建議 C/I"):
         if latest_ci is None:
             st.warning("查無該餐別的建議 C/I 紀錄，或是目前日期之前都沒有。")
         else:
-            st.session_state.ci_value = float(latest_ci)
+            st.session_state.ci_default = float(latest_ci)
             st.session_state.ci_hint = f"已自 {latest_date_str} 的 {meal} 載入建議 C/I：{latest_ci}"
             st.rerun()
 
