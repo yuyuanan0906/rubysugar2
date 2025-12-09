@@ -11,6 +11,7 @@ from gspread.exceptions import WorksheetNotFound
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SHEET_ID = st.secrets["MAIN_SHEET_ID"]  # 在 secrets.toml 裡設定
 
+
 @st.cache_resource
 def get_gsheet_client():
     """
@@ -21,20 +22,34 @@ def get_gsheet_client():
     client = gspread.authorize(creds)
     return client
 
+
+def get_food_worksheet():
+    """
+    取得或建立『食物資料』工作表，並確保表頭存在
+    """
+    client = get_gsheet_client()
+    sh = client.open_by_key(SHEET_ID)
+    try:
+        ws = sh.worksheet("食物資料")
+    except WorksheetNotFound:
+        ws = sh.add_worksheet(title="食物資料", rows=1000, cols=4)
+        ws.append_row(["食物名稱", "單位", "碳水化合物", "備註"])
+    return ws
+
+
 @st.cache_data
 def load_foods_df() -> pd.DataFrame:
     """
     從 Google Sheets 的「食物資料」工作表讀取資料
     """
-    client = get_gsheet_client()
-    sh = client.open_by_key(SHEET_ID)
-    ws = sh.worksheet("食物資料")
+    ws = get_food_worksheet()
     records = ws.get_all_records()
     if not records:
         # 沒有資料時回傳空 DataFrame
         return pd.DataFrame(columns=["食物名稱", "單位", "碳水化合物", "備註"])
     df = pd.DataFrame(records)
     return df
+
 
 @st.cache_data
 def load_insulin_records_df() -> pd.DataFrame:
@@ -60,6 +75,7 @@ def load_insulin_records_df() -> pd.DataFrame:
             "總胰島素劑量", "餐後血糖值", "建議C/I值"
         ])
     return pd.DataFrame(records)
+
 
 def append_meal_to_sheets(
     date_str, meal,
@@ -95,7 +111,7 @@ def append_meal_to_sheets(
     # 總碳水小結
     ws_food.append_row(["", "", "", "", "總碳水", total_carb])
 
-    # --- 寫入「血糖與胰島素紀錄表」 ---
+    # --- 寫入「血糖與胰島素紀錄表」---
     try:
         ws_insulin = sh.worksheet("血糖與胰島素紀錄表")
     except WorksheetNotFound:
@@ -124,6 +140,7 @@ def append_meal_to_sheets(
 
     # 清掉 cache，下次讀取才會拿到最新資料
     load_insulin_records_df.clear()
+
 
 def update_post_glucose_and_ci(date_str: str, meal: str, post_glucose: int):
     """
@@ -191,6 +208,46 @@ def update_post_glucose_and_ci(date_str: str, meal: str, post_glucose: int):
 
     return recommended_ci
 
+
+# ======== 食物資料新增 / 刪除相關函式 ========
+
+def add_food_item(name: str, unit: str, carb: float, note: str):
+    """
+    新增一筆食物資料到『食物資料』工作表
+    """
+    ws = get_food_worksheet()
+    ws.append_row([name, unit, carb, note])
+    load_foods_df.clear()
+
+
+def delete_food_item_by_index(df: pd.DataFrame, index: int):
+    """
+    依照 DataFrame 的 index 刪除對應 Google Sheet 的那一列
+    DataFrame 第 0 列對應到 Sheet 的第 2 列（第 1 列是表頭）
+    """
+    ws = get_food_worksheet()
+    # 安全檢查
+    if index < 0 or index >= len(df):
+        return
+    sheet_row = index + 2
+    ws.delete_rows(sheet_row)
+    load_foods_df.clear()
+
+
+def clear_all_food_items():
+    """
+    清除所有食物資料（只保留表頭）
+    """
+    ws = get_food_worksheet()
+    values = ws.get_all_values()
+    # values 的長度代表目前有幾列（包含標題列）
+    num_rows = len(values)
+    if num_rows > 1:
+        # 刪掉第 2 列到最後一列
+        ws.delete_rows(2, num_rows)
+    load_foods_df.clear()
+
+
 # ======== 工具函式 ========
 
 def find_similar_foods(df_foods: pd.DataFrame, keyword: str, threshold=60):
@@ -201,6 +258,7 @@ def find_similar_foods(df_foods: pd.DataFrame, keyword: str, threshold=60):
     )
     return df_foods[mask]
 
+
 def round_insulin(value: float) -> float:
     decimal = value - int(value)
     if decimal <= 0.25:
@@ -209,6 +267,7 @@ def round_insulin(value: float) -> float:
         return round(int(value) + 0.5, 1)
     else:
         return round(int(value) + 1.0, 1)
+
 
 def calc_insulin_dose(total_carb, ci, isf, current_glucose, target_glucose):
     insulin_carb = total_carb / ci if ci > 0 else 0
@@ -245,14 +304,14 @@ st.divider()
 # --- Step 2：加入本餐食物 ---
 st.markdown("### Step 2：加入本餐食物")
 
-with st.form("add_food_form", clear_on_submit=True):
+with st.form("add_meal_food_form", clear_on_submit=True):
     keyword = st.text_input("🔍 搜尋食物名稱（關鍵字）")
     filtered = find_similar_foods(foods_df, keyword)
 
     selected_food = None
 
     if filtered.empty:
-        st.info("查無相似食物，可以直接到 Google Sheets 的『食物資料』工作表新增。")
+        st.info("查無相似食物，可以到下方『食物資料管理』新增。")
     else:
         food_options = (
             filtered["食物名稱"]
@@ -389,3 +448,61 @@ if st.button("📥 儲存餐後血糖並回推建議 C/I"):
             else:
                 st.success(f"✅ 已寫入餐後血糖值，回推建議 C/I 為：{recommended_ci}")
                 st.info("之後可以把這個建議值用在同一餐別的 C/I 設定。")
+
+st.divider()
+
+# --- 食物資料管理：新增 / 單筆刪除 / 全部清除 ---
+st.markdown("### 🍱 食物資料管理（新增 / 刪除）")
+
+col_left, col_right = st.columns(2)
+
+with col_left:
+    st.subheader("➕ 新增食物")
+    with st.form("add_food_item_form", clear_on_submit=True):
+        new_name = st.text_input("食物名稱")
+        new_unit = st.selectbox("單位", ["克(g)", "毫升(ml)", "份"], index=0)
+        new_carb = st.number_input("碳水（每單位，g）", min_value=0.0, step=0.1)
+        new_note = st.text_input("備註（可留白）")
+
+        submit_new_food = st.form_submit_button("✅ 新增食物到『食物資料』")
+
+        if submit_new_food:
+            if not new_name or not new_unit:
+                st.warning("請至少填寫『食物名稱』與『單位』")
+            elif new_carb <= 0:
+                st.warning("碳水值需大於 0")
+            else:
+                add_food_item(new_name.strip(), new_unit.strip(), float(new_carb), new_note.strip())
+                st.success(f"已新增食物：{new_name}")
+                st.experimental_rerun()
+
+with col_right:
+    st.subheader("🗑 刪除食物")
+
+    foods_df = load_foods_df()  # 重新抓最新的
+
+    if foods_df.empty:
+        st.info("目前『食物資料』尚無任何食物，請先新增。")
+    else:
+        st.caption("目前已登錄的食物：")
+        st.dataframe(foods_df, use_container_width=True, height=220)
+
+        # 單筆刪除
+        selected_index = st.selectbox(
+            "選擇要刪除的食物",
+            foods_df.index,
+            format_func=lambda i: f"{foods_df.loc[i, '食物名稱']}｜每{foods_df.loc[i, '單位']} 含 {foods_df.loc[i, '碳水化合物']}g"
+        )
+
+        if st.button("❌ 刪除選擇的這筆食物"):
+            name_to_delete = foods_df.loc[selected_index, "食物名稱"]
+            delete_food_item_by_index(foods_df, selected_index)
+            st.success(f"已刪除食物：{name_to_delete}")
+            st.experimental_rerun()
+
+        # 全部清除
+        st.markdown("---")
+        if st.button("⚠️ 清除所有食物資料（保留表頭）"):
+            clear_all_food_items()
+            st.success("已清除所有食物資料（保留表頭）。")
+            st.experimental_rerun()
