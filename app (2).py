@@ -240,7 +240,6 @@ def clear_all_food_items():
     """
     ws = get_food_worksheet()
     values = ws.get_all_values()
-    # values 的長度代表目前有幾列（包含標題列）
     num_rows = len(values)
     if num_rows > 1:
         # 刪掉第 2 列到最後一列
@@ -367,7 +366,7 @@ if st.session_state.calc_items:
 
     if st.button("🧹 清除本餐所有食物"):
         st.session_state.calc_items = []
-        st.experimental_rerun()
+        st.rerun()
 else:
     total_carb = 0.0
     st.info("尚未加入任何食物。")
@@ -474,7 +473,7 @@ with col_left:
             else:
                 add_food_item(new_name.strip(), new_unit.strip(), float(new_carb), new_note.strip())
                 st.success(f"已新增食物：{new_name}")
-                st.experimental_rerun()
+                st.rerun()
 
 with col_right:
     st.subheader("🗑 刪除食物")
@@ -498,11 +497,11 @@ with col_right:
             name_to_delete = foods_df.loc[selected_index, "食物名稱"]
             delete_food_item_by_index(foods_df, selected_index)
             st.success(f"已刪除食物：{name_to_delete}")
-            st.experimental_rerun()
+            st.rerun()
 
         # 全部清除
         st.markdown("---")
         if st.button("⚠️ 清除所有食物資料（保留表頭）"):
             clear_all_food_items()
             st.success("已清除所有食物資料（保留表頭）。")
-            st.experimental_rerun()
+            st.rerun()
