@@ -349,7 +349,7 @@ with st.form("add_meal_food_form", clear_on_submit=True):
             })
             st.success(f"已加入：{selected_food['name']}，碳水 {carb} g")
 
-# 顯示本餐食物列表
+# 顯示本餐食物列表（含單筆刪除）
 if st.session_state.calc_items:
     st.markdown("#### 本餐食物清單")
     df_current = pd.DataFrame(st.session_state.calc_items)
@@ -361,12 +361,31 @@ if st.session_state.calc_items:
     })
     st.dataframe(df_display, use_container_width=True)
 
+    # 總碳水
     total_carb = round(df_current["carb"].sum(), 2)
     st.subheader(f"本餐總碳水量：**{total_carb} g**")
 
-    if st.button("🧹 清除本餐所有食物"):
-        st.session_state.calc_items = []
-        st.rerun()
+    st.markdown("##### 單筆刪除本餐食物")
+    delete_idx = st.selectbox(
+        "選擇要刪除的食物",
+        df_current.index,
+        format_func=lambda i: (
+            f"{df_current.loc[i, 'name']}｜"
+            f"{df_current.loc[i, 'amount']}{df_current.loc[i, 'unit']}｜"
+            f"{df_current.loc[i, 'carb']} g"
+        )
+    )
+
+    col_del1, col_del2 = st.columns(2)
+    with col_del1:
+        if st.button("❌ 刪除選擇的這一筆"):
+            del st.session_state.calc_items[delete_idx]
+            st.rerun()
+    with col_del2:
+        if st.button("🧹 清除本餐所有食物"):
+            st.session_state.calc_items = []
+            st.rerun()
+
 else:
     total_carb = 0.0
     st.info("尚未加入任何食物。")
